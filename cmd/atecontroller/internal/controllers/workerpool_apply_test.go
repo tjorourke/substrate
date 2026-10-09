@@ -15,6 +15,7 @@
 package controllers
 
 import (
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -492,6 +493,57 @@ func TestAteomSecurityContextByClass(t *testing.T) {
 				*sc.SeccompProfile.Type == corev1.SeccompProfileTypeUnconfined
 			if gotSeccompUnconfined != tt.wantSeccompUnconfined {
 				t.Errorf("seccomp Unconfined = %v, want %v", gotSeccompUnconfined, tt.wantSeccompUnconfined)
+			}
+		})
+	}
+}
+
+func TestWorkerSecurityContext(t *testing.T) {
+	tests := []struct {
+		name     string
+		class    atev1alpha1.SandboxClass
+		settings *atev1alpha1.WorkerPoolSecurityContext
+		wantCaps []corev1.Capability
+	}{
+		{"empty settings", atev1alpha1.SandboxClassGvisor, &atev1alpha1.WorkerPoolSecurityContext{}, ateomGvisorCapabilities},
+		{"drop gvisor capabilities", atev1alpha1.SandboxClassGvisor, &atev1alpha1.WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"SYS_PTRACE", "MKNOD"}}, []corev1.Capability{"NET_ADMIN", "SYS_ADMIN", "SYS_CHROOT", "SETUID", "SETGID", "SETPCAP", "DAC_OVERRIDE", "FOWNER", "CHOWN", "NET_RAW", "SETFCAP"}},
+		{"drop microvm capabilities", atev1alpha1.SandboxClassMicroVM, &atev1alpha1.WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"FSETID", "DAC_READ_SEARCH"}}, ateomGvisorCapabilities},
+		{"capability absent from class", atev1alpha1.SandboxClassGvisor, &atev1alpha1.WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"FSETID"}}, ateomGvisorCapabilities},
+		{"drop all", atev1alpha1.SandboxClassGvisor, &atev1alpha1.WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"ALL"}}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wp := testWorkerPoolApplyConfig(&atev1alpha1.WorkerPoolPodTemplate{SecurityContext: tt.settings})
+			wp.Spec.SandboxClasses = []atev1alpha1.WorkerPoolSandboxClass{{Name: tt.class}}
+			sc := buildDeploymentApplyConfig(wp, ateomOTelSettings{}, installdefaults.SystemNamespace, installdefaults.AteletServiceAccount, installdefaults.RouterServiceAccount).Spec.Template.Spec.Containers[0].SecurityContext
+			if diff := cmp.Diff(tt.wantCaps, sc.Capabilities.Add); diff != "" {
+				t.Fatalf("capabilities (-want +got):\n%s", diff)
+			}
+			if *sc.Privileged || *sc.RunAsUser != 0 || *sc.RunAsGroup != 0 || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
+				t.Fatal("worker identity, privileged mode or capability default changed")
+			}
+			if *sc.SeccompProfile.Type != corev1.SeccompProfileTypeUnconfined || sc.AllowPrivilegeEscalation != nil {
+				t.Fatal("unconfigured security settings changed")
+			}
+			// A pool's override must not change the defaults used by another pool.
+			if diff := cmp.Diff(ateomGvisorCapabilities, ateomSecurityContext(atev1alpha1.SandboxClassGvisor).Capabilities.Add); diff != "" {
+				t.Fatalf("default capabilities were mutated:\n%s", diff)
+			}
+		})
+	}
+	for _, profile := range []*corev1.SeccompProfile{
+		{Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To("substrate-worker.json")},
+		{Type: corev1.SeccompProfileTypeRuntimeDefault},
+		{Type: corev1.SeccompProfileTypeUnconfined},
+	} {
+		t.Run(string(profile.Type), func(t *testing.T) {
+			wp := testWorkerPoolApplyConfig(&atev1alpha1.WorkerPoolPodTemplate{SecurityContext: &atev1alpha1.WorkerPoolSecurityContext{SeccompProfile: profile, AllowPrivilegeEscalation: ptr.To(false)}})
+			sc := buildDeploymentApplyConfig(wp, ateomOTelSettings{}, installdefaults.SystemNamespace, installdefaults.AteletServiceAccount, installdefaults.RouterServiceAccount).Spec.Template.Spec.Containers[0].SecurityContext
+			if *sc.SeccompProfile.Type != profile.Type || !reflect.DeepEqual(sc.SeccompProfile.LocalhostProfile, profile.LocalhostProfile) {
+				t.Fatal("seccomp profile was not applied")
+			}
+			if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
+				t.Fatal("privilege escalation was not disabled")
 			}
 		})
 	}

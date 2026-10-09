@@ -60,6 +60,37 @@ The pin is critical to make a rolling upgrade possible. An upgrade moves nodes t
 the new version one at a time, deleting each node's old worker pods once it
 moves. A pinned pool cannot put those pods back on a moved node, so the old
 version drains away node by node. An unpinned pool breaks this constraints.
+
+#### Worker security (`spec.template.securityContext`)
+
+The worker runs the sandbox runtime, not the application. Its security settings
+are separate from `ActorTemplate.containers[].securityContext`.
+
+Omitting `securityContext` preserves the sandbox class's defaults. Workers remain
+root and non-privileged. `dropCapabilities` removes capabilities from that class's
+default set; it cannot add capabilities. `ALL` removes the entire set.
+
+```yaml
+spec:
+  template:
+    securityContext:
+      dropCapabilities: [SYS_CHROOT, SYS_PTRACE, SETPCAP, MKNOD]
+      allowPrivilegeEscalation: false
+      seccompProfile:
+        type: Localhost
+        localhostProfile: substrate-worker.json
+```
+
+This example restricts a gVisor worker. It is not a portable profile for every
+kernel, architecture, or sandbox runtime. Install the Localhost profile on every
+selected node before applying it. An absent profile prevents worker startup.
+Removing required capabilities or blocking sandbox setup syscalls can prevent
+actors from starting or restoring. Validate image unpacking, networking, file
+ownership, and checkpoint/restore for the selected runtime.
+
+Removing an override restores that setting's default. WorkerPool updates roll
+the worker Deployment, so suspend running actors before changing permissions.
+
 #### Worker Capacity (`spec.template.resources`)
 
 Setting `resources.limits` (CPU and Memory) on a `WorkerPool` establishes each worker pod's **capacity** — the envelope its actor sandboxes share, taken from the `ateom` container's limits. The scheduler only places an actor on a worker whose remaining capacity is `>=` the actor's declared resource limits (see [Sandbox Right-Sizing](#sandbox-right-sizing-resources) on the `ActorTemplate`).

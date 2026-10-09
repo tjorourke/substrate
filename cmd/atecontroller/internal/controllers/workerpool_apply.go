@@ -234,6 +234,9 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool, otel ateomOTelSettin
 		)
 
 	applyWorkerPoolPodTemplate(podSpecAC, containerAC, wp.Spec.Template)
+	if wp.Spec.Template != nil && wp.Spec.Template.SecurityContext != nil {
+		applyWorkerSecurityContext(containerAC.SecurityContext, wp.Spec.Template.SecurityContext)
+	}
 	applySandboxClassToleration(podSpecAC, wp.Spec.DefaultSandboxClass())
 	maybeApplyMicroVMPodShape(podSpecAC, containerAC, wp.Spec.DefaultSandboxClass())
 	podSpecAC.WithContainers(containerAC)
@@ -337,6 +340,26 @@ func fieldRefEnv(name, fieldPath string) *corev1ac.EnvVarApplyConfiguration {
 		WithValueFrom(corev1ac.EnvVarSource().
 			WithFieldRef(corev1ac.ObjectFieldSelector().
 				WithFieldPath(fieldPath)))
+}
+
+func applyWorkerSecurityContext(sc *corev1ac.SecurityContextApplyConfiguration, settings *atev1alpha1.WorkerPoolSecurityContext) {
+	if slices.Contains(settings.DropCapabilities, corev1.Capability("ALL")) {
+		sc.Capabilities.Add = nil
+	} else {
+		sc.Capabilities.Add = slices.DeleteFunc(sc.Capabilities.Add, func(capability corev1.Capability) bool {
+			return slices.Contains(settings.DropCapabilities, capability)
+		})
+	}
+	if settings.SeccompProfile != nil {
+		profile := corev1ac.SeccompProfile().WithType(settings.SeccompProfile.Type)
+		if settings.SeccompProfile.LocalhostProfile != nil {
+			profile.WithLocalhostProfile(*settings.SeccompProfile.LocalhostProfile)
+		}
+		sc.WithSeccompProfile(profile)
+	}
+	if settings.AllowPrivilegeEscalation != nil {
+		sc.WithAllowPrivilegeEscalation(*settings.AllowPrivilegeEscalation)
+	}
 }
 
 // ateomGvisorCapabilities is the capability set an unprivileged gVisor worker
