@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
 const gpuResourceName = corev1.ResourceName("nvidia.com/gpu")
@@ -30,6 +31,44 @@ const gpuResourceName = corev1.ResourceName("nvidia.com/gpu")
 func gpuTemplate(limits, requests corev1.ResourceList) *WorkerPoolPodTemplate {
 	return &WorkerPoolPodTemplate{
 		Resources: &corev1.ResourceRequirements{Limits: limits, Requests: requests},
+	}
+}
+
+func TestWorkerPoolSecurityValidation(t *testing.T) {
+	tests := []struct {
+		name     string
+		settings WorkerPoolSecurityContext
+		wantErr  bool
+	}{
+		{"empty", WorkerPoolSecurityContext{}, false},
+		{"drop capabilities", WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"SYS_PTRACE", "MKNOD"}}, false},
+		{"drop all", WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"ALL"}}, false},
+		{"unknown capability", WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"NOT_A_CAPABILITY"}}, true},
+		{"duplicate capability", WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"MKNOD", "MKNOD"}}, true},
+		{"disable escalation", WorkerPoolSecurityContext{AllowPrivilegeEscalation: ptr.To(false)}, false},
+		{"enable escalation", WorkerPoolSecurityContext{AllowPrivilegeEscalation: ptr.To(true)}, true},
+		{"runtime default", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}}, false},
+		{"unconfined", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined}}, false},
+		{"localhost", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To("profiles/worker.json")}}, false},
+		{"missing type", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{}}, true},
+		{"unknown type", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: "Unknown"}}, true},
+		{"missing localhost path", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeLocalhost}}, true},
+		{"empty localhost path", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To("")}}, true},
+		{"path on runtime default", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault, LocalhostProfile: ptr.To("worker.json")}}, true},
+		{"absolute path", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To("/worker.json")}}, true},
+		{"path traversal", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To("profiles/../worker.json")}}, true},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wp := &WorkerPool{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("security-validation-%d", i), Namespace: "default"}, Spec: WorkerPoolSpec{Replicas: 1, WorkerImage: "ateom:v1", Template: &WorkerPoolPodTemplate{SecurityContext: &tt.settings}}}
+			err := k8sClient.Create(t.Context(), wp)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("create WorkerPool: %v, wantErr %v", err, tt.wantErr)
+			}
+			if err == nil {
+				t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), wp) })
+			}
+		})
 	}
 }
 

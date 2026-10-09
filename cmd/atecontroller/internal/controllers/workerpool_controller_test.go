@@ -455,6 +455,62 @@ func TestWorkerPoolPodTemplateUpdate(t *testing.T) {
 	})
 }
 
+func TestWorkerPoolSecurityContextUpdateAndClear(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	wp := makeWorkerPool("test-security-update", "default", 1, "ateom:v1")
+	wp.Spec.Template = &atev1alpha1.WorkerPoolPodTemplate{SecurityContext: &atev1alpha1.WorkerPoolSecurityContext{
+		DropCapabilities:         []corev1.Capability{"SYS_PTRACE", "MKNOD"},
+		AllowPrivilegeEscalation: ptr.To(false),
+		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To("worker.json")},
+	}}
+	if err := k8sClient.Create(ctx, wp); err != nil {
+		t.Fatal(err)
+	}
+	deleteOnCleanup(t, wp)
+	eventually(t, func(ctx context.Context) (bool, error) {
+		dep, err := getDeployment(ctx, wp)
+		if err != nil {
+			return false, nil
+		}
+		sc := dep.Spec.Template.Spec.Containers[0].SecurityContext
+		return sc.SeccompProfile != nil && sc.SeccompProfile.Type == corev1.SeccompProfileTypeLocalhost && len(sc.Capabilities.Add) == 11 && sc.AllowPrivilegeEscalation != nil && !*sc.AllowPrivilegeEscalation, nil
+	})
+	updateWorkerPoolSpec(t, ctx, wp, "change seccomp profile", func(current *atev1alpha1.WorkerPool) {
+		current.Spec.Template.SecurityContext.SeccompProfile = &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}
+	})
+	eventually(t, func(ctx context.Context) (bool, error) {
+		dep, err := getDeployment(ctx, wp)
+		if err != nil {
+			return false, nil
+		}
+		profile := dep.Spec.Template.Spec.Containers[0].SecurityContext.SeccompProfile
+		return profile != nil && profile.Type == corev1.SeccompProfileTypeRuntimeDefault && profile.LocalhostProfile == nil, nil
+	})
+	updateDeploymentSpec(t, ctx, wp, "alter generated security context", func(dep *appsv1.Deployment) {
+		dep.Spec.Template.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation = ptr.To(true)
+	})
+	eventually(t, func(ctx context.Context) (bool, error) {
+		dep, err := getDeployment(ctx, wp)
+		if err != nil {
+			return false, nil
+		}
+		value := dep.Spec.Template.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation
+		return value != nil && !*value, nil
+	})
+	updateWorkerPoolSpec(t, ctx, wp, "remove security overrides", func(current *atev1alpha1.WorkerPool) {
+		current.Spec.Template.SecurityContext = nil
+	})
+	eventually(t, func(ctx context.Context) (bool, error) {
+		dep, err := getDeployment(ctx, wp)
+		if err != nil {
+			return false, nil
+		}
+		sc := dep.Spec.Template.Spec.Containers[0].SecurityContext
+		return reflect.DeepEqual(sc.Capabilities.Add, ateomGvisorCapabilities) && sc.SeccompProfile.Type == corev1.SeccompProfileTypeUnconfined && sc.SeccompProfile.LocalhostProfile == nil && (sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation), nil
+	})
+}
+
 // TestWorkerPoolPodTemplateClear verifies that clearing template.nodeSelector
 // removes it from the managed Deployment.
 func TestWorkerPoolPodTemplateClear(t *testing.T) {
