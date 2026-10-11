@@ -17,12 +17,15 @@ package v1alpha1
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
 const gpuResourceName = corev1.ResourceName("nvidia.com/gpu")
@@ -30,6 +33,123 @@ const gpuResourceName = corev1.ResourceName("nvidia.com/gpu")
 func gpuTemplate(limits, requests corev1.ResourceList) *WorkerPoolPodTemplate {
 	return &WorkerPoolPodTemplate{
 		Resources: &corev1.ResourceRequirements{Limits: limits, Requests: requests},
+	}
+}
+
+func TestWorkerPoolSecurityValidation(t *testing.T) {
+	tests := []struct {
+		name     string
+		settings WorkerPoolSecurityContext
+		errMsg   string
+	}{
+		{"empty", WorkerPoolSecurityContext{}, ""},
+		{"drop capabilities", WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"SYS_PTRACE", "MKNOD"}}, ""},
+		{"drop all", WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"ALL"}}, "dropCapabilities[0]: Unsupported value"},
+		{"unknown capability", WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"NOT_A_CAPABILITY"}}, "dropCapabilities[0]: Unsupported value"},
+		{"duplicate capability", WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"MKNOD", "MKNOD"}}, "dropCapabilities[1]: Duplicate value"},
+		{"no new privileges", WorkerPoolSecurityContext{NoNewPrivileges: ptr.To(true)}, ""},
+		{"privileges allowed", WorkerPoolSecurityContext{NoNewPrivileges: ptr.To(false)}, ""},
+		{"runtime default", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}}, ""},
+		{"unconfined", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined}}, ""},
+		{"localhost", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To("profiles/worker.json")}}, ""},
+		{"missing type", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{}}, "invalid seccomp profile type"},
+		{"unknown type", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: "Unknown"}}, "invalid seccomp profile type"},
+		{"missing localhost path", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeLocalhost}}, "localhostProfile is required only for Localhost"},
+		{"empty localhost path", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To("")}}, "localhostProfile is required only for Localhost"},
+		{"path on runtime default", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault, LocalhostProfile: ptr.To("worker.json")}}, "localhostProfile is required only for Localhost"},
+		{"absolute path", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To("/worker.json")}}, "localhostProfile must be a relative path without traversal"},
+		{"path traversal", WorkerPoolSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To("profiles/../worker.json")}}, "localhostProfile must be a relative path without traversal"},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, operation := range []string{"create", "update"} {
+				t.Run(operation, func(t *testing.T) {
+					wp := &WorkerPool{
+						ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("security-validation-%d-%s", i, operation), Namespace: "default"},
+						Spec: WorkerPoolSpec{
+							Replicas: 1, WorkerImage: "ateom:v1",
+							SandboxClasses: []WorkerPoolSandboxClass{{Name: SandboxClassGvisor}},
+						},
+					}
+					if operation == "update" {
+						if err := k8sClient.Create(t.Context(), wp); err != nil {
+							t.Fatalf("create valid WorkerPool: %v", err)
+						}
+						t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), wp) })
+					}
+					wp.Spec.Template = &WorkerPoolPodTemplate{SecurityContext: tt.settings.DeepCopy()}
+					var err error
+					if operation == "update" {
+						err = k8sClient.Update(t.Context(), wp)
+					} else {
+						err = k8sClient.Create(t.Context(), wp)
+						if err == nil {
+							t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), wp) })
+						}
+					}
+					if tt.errMsg == "" {
+						if err != nil {
+							t.Fatalf("%s WorkerPool: %v", operation, err)
+						}
+						return
+					}
+					if !k8errors.IsInvalid(err) || !strings.Contains(err.Error(), "spec.template.securityContext") || !strings.Contains(err.Error(), tt.errMsg) {
+						t.Fatalf("%s WorkerPool: got %v, want securityContext validation error containing %q", operation, err, tt.errMsg)
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestWorkerPoolDropCapabilitiesByClass checks that validation admits exactly
+// DroppableWorkerCapabilities for each sandbox class, one capability at a time
+// and all together.
+func TestWorkerPoolDropCapabilitiesByClass(t *testing.T) {
+	// Every capability either class grants by default, plus ALL.
+	candidates := []corev1.Capability{
+		"ALL", "CHOWN", "DAC_OVERRIDE", "DAC_READ_SEARCH", "FOWNER", "FSETID", "MKNOD", "NET_ADMIN",
+		"NET_RAW", "SETFCAP", "SETGID", "SETPCAP", "SETUID", "SYS_ADMIN", "SYS_CHROOT", "SYS_PTRACE",
+	}
+	for _, class := range []SandboxClass{SandboxClassGvisor, SandboxClassMicroVM} {
+		droppable := DroppableWorkerCapabilities[class]
+		cases := []struct {
+			name string
+			drop []corev1.Capability
+			ok   bool
+		}{{name: "every droppable capability", drop: droppable, ok: true}}
+		for _, capability := range candidates {
+			cases = append(cases, struct {
+				name string
+				drop []corev1.Capability
+				ok   bool
+			}{name: string(capability), drop: []corev1.Capability{capability}, ok: slices.Contains(droppable, capability)})
+		}
+		for i, tt := range cases {
+			t.Run(string(class)+"/"+tt.name, func(t *testing.T) {
+				wp := &WorkerPool{
+					ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("drop-%s-%d", class, i), Namespace: "default"},
+					Spec: WorkerPoolSpec{
+						Replicas: 1, WorkerImage: "ateom:v1",
+						SandboxClasses: []WorkerPoolSandboxClass{{Name: class}},
+						Template:       &WorkerPoolPodTemplate{SecurityContext: &WorkerPoolSecurityContext{DropCapabilities: tt.drop}},
+					},
+				}
+				err := k8sClient.Create(t.Context(), wp)
+				if err == nil {
+					t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), wp) })
+				}
+				if tt.ok {
+					if err != nil {
+						t.Fatalf("create WorkerPool dropping %v: %v", tt.drop, err)
+					}
+					return
+				}
+				if !k8errors.IsInvalid(err) || !strings.Contains(err.Error(), "spec.template.securityContext.dropCapabilities") {
+					t.Fatalf("create WorkerPool dropping %v: got %v, want a dropCapabilities validation error", tt.drop, err)
+				}
+			})
+		}
 	}
 }
 

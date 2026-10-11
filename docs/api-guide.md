@@ -27,6 +27,7 @@ The `WorkerPool` defines the pool of physical "warm" compute capacity. It manage
 | `nodeAffinity` | `NodeAffinity` | `spec.affinity.nodeAffinity` |
 | `resources` | `ResourceRequirements` | `spec.containers[].resources` |
 | `serviceAccountName` | `string` | `spec.serviceAccountName` |
+| `securityContext` | `WorkerPoolSecurityContext` | Security settings for the `ateom` container; see [Worker security](#worker-security-spectemplatesecuritycontext). |
 
 Keys in `ate.dev/` and its subdomains (for example, `policy.ate.dev/`) are
 reserved for controllers and cannot be set in `template.labels` or
@@ -60,6 +61,87 @@ The pin is critical to make a rolling upgrade possible. An upgrade moves nodes t
 the new version one at a time, deleting each node's old worker pods once it
 moves. A pinned pool cannot put those pods back on a moved node, so the old
 version drains away node by node. An unpinned pool breaks this constraints.
+
+#### Worker security (`spec.template.securityContext`)
+
+`spec.template.securityContext` restricts the `ateom` worker container that hosts
+the sandbox runtime. Actor containers are configured separately through
+`ActorTemplate.containers[].securityContext`.
+
+- `dropCapabilities`: capabilities to remove from the sandbox class's defaults.
+- `noNewPrivileges`: `true` sets `no_new_privs` on the worker
+  (`allowPrivilegeEscalation: false`), so no process in it can gain
+  privileges by running a setuid or file-capability binary.
+- `seccompProfile`: `Unconfined` (the default), `RuntimeDefault`, or a
+  `Localhost` profile installed on every node the pool selects.
+
+Workers run as UID/GID 0 with `privileged: false`, `Unconfined` seccomp and
+AppArmor profiles, and the capabilities below. A drop is accepted only where the
+table says "Can drop".
+
+| Capability | `gvisor` | `microvm` |
+| --- | --- | --- |
+| `CHOWN`, `FOWNER`, `MKNOD`, `SETPCAP`, `SYS_CHROOT`, `SYS_PTRACE` | Can drop | Can drop |
+| `DAC_READ_SEARCH`, `FSETID` | Not granted | Can drop |
+| `NET_RAW` | Needed to open the sandbox's raw socket | Can drop |
+| `SETFCAP`, `SETUID` | Needed to start runsc's gofer | Can drop |
+| `SETGID` | Needed to start runsc's gofer | Needed by virtiofsd to drop supplementary groups |
+| `DAC_OVERRIDE` | Needed to mount the rootfs overlay | Same |
+| `NET_ADMIN` | Needed to set up actor networking | Same |
+| `SYS_ADMIN` | Needed to set up the worker's mounts | Same |
+
+Each drop was tested alone and with the class's other drops, through golden
+snapshot creation, pause/resume and suspend/resume. On micro-VM, virtiofsd loses
+dropped capabilities too, so guest operations on the shared filesystem that need
+them fail, for example `mknod` without `MKNOD`.
+
+The example [amd64](examples/seccomp/substrate-worker-amd64.json) and
+[arm64](examples/seccomp/substrate-worker-arm64.json) profiles allow moby's
+default set plus the namespace and mount syscalls the worker needs. Compared
+with `Unconfined`, they deny every other syscall, including module loading,
+`kexec_load`, the kernel keyring, `bpf`, `perf_event_open`, `io_uring`,
+`userfaultfd` and `open_by_handle_at`, and they refuse `AF_VSOCK` and `AF_ALG`
+sockets. `hack/seccomp` generates both from one list. Substrate does not install
+them: put the file for the node's architecture in the kubelet's seccomp
+directory, normally `/var/lib/kubelet/seccomp`, on every node the pool selects.
+
+None of these settings are on by default. For the least privilege each runtime
+supports, drop every capability the table allows, set `noNewPrivileges` and use
+the example profile. A gVisor pool then keeps 7 capabilities:
+
+```yaml
+spec:
+  sandboxClasses:
+    - name: gvisor
+  template:
+    securityContext:
+      dropCapabilities: [CHOWN, FOWNER, MKNOD, SETPCAP, SYS_CHROOT, SYS_PTRACE]
+      noNewPrivileges: true
+      seccompProfile:
+        type: Localhost
+        localhostProfile: substrate-worker-amd64.json
+```
+
+A micro-VM pool keeps 4, and virtiofsd keeps 2 of its 9:
+
+```yaml
+spec:
+  sandboxClasses:
+    - name: microvm
+  template:
+    securityContext:
+      dropCapabilities: [CHOWN, DAC_READ_SEARCH, FOWNER, FSETID, MKNOD, NET_RAW,
+                         SETFCAP, SETPCAP, SETUID, SYS_CHROOT, SYS_PTRACE]
+      noNewPrivileges: true
+      seccompProfile:
+        type: Localhost
+        localhostProfile: substrate-worker-amd64.json
+```
+
+Removing a setting restores its default. Changing these settings replaces worker
+pods, so suspend actors on the affected workers first; see the
+[worker-pool rollout guidance](upgrade.md#three-things-that-break-an-upgrade).
+
 #### Worker Capacity (`spec.template.resources`)
 
 Setting `resources.limits` (CPU and Memory) on a `WorkerPool` establishes each worker pod's **capacity** — the envelope its actor sandboxes share, taken from the `ateom` container's limits. The scheduler only places an actor on a worker whose remaining capacity is `>=` the actor's declared resource limits (see [Sandbox Right-Sizing](#sandbox-right-sizing-resources) on the `ActorTemplate`).

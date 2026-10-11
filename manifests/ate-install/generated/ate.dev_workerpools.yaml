@@ -419,6 +419,76 @@ spec:
                           More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                         type: object
                     type: object
+                  securityContext:
+                    description: |-
+                      SecurityContext restricts the worker container's runtime permissions.
+                      These settings do not change the actor containers' security contexts.
+                    properties:
+                      dropCapabilities:
+                        description: |-
+                          DropCapabilities removes capabilities from the sandbox class's default
+                          set. Only capabilities the class's worker can run without are accepted:
+                          gvisor workers can drop CHOWN, FOWNER, MKNOD, SETPCAP, SYS_CHROOT and
+                          SYS_PTRACE, and microvm workers can also drop DAC_READ_SEARCH, FSETID,
+                          NET_RAW, SETFCAP and SETUID.
+                        items:
+                          description: Capability represent POSIX capabilities type
+                          enum:
+                          - CHOWN
+                          - DAC_READ_SEARCH
+                          - FOWNER
+                          - FSETID
+                          - MKNOD
+                          - NET_RAW
+                          - SETFCAP
+                          - SETPCAP
+                          - SETUID
+                          - SYS_CHROOT
+                          - SYS_PTRACE
+                          type: string
+                        maxItems: 11
+                        type: array
+                        x-kubernetes-list-type: set
+                      noNewPrivileges:
+                        description: |-
+                          NoNewPrivileges sets no_new_privs on the worker, so its processes
+                          cannot gain privileges by executing setuid or file-capability binaries.
+                        type: boolean
+                      seccompProfile:
+                        description: |-
+                          SeccompProfile replaces the sandbox class's default seccomp profile.
+                          A Localhost profile must be installed on every node this pool selects.
+                        properties:
+                          localhostProfile:
+                            description: |-
+                              localhostProfile indicates a profile defined in a file on the node should be used.
+                              The profile must be preconfigured on the node to work.
+                              Must be a descending path, relative to the kubelet's configured seccomp profile location.
+                              Must be set if type is "Localhost". Must NOT be set for any other type.
+                            type: string
+                          type:
+                            description: |-
+                              type indicates which kind of seccomp profile will be applied.
+                              Valid options are:
+
+                              Localhost - a profile defined in a file on the node should be used.
+                              RuntimeDefault - the container runtime default profile should be used.
+                              Unconfined - no profile should be applied.
+                            type: string
+                        required:
+                        - type
+                        type: object
+                        x-kubernetes-validations:
+                        - message: invalid seccomp profile type
+                          rule: self.type in ['Unconfined', 'RuntimeDefault', 'Localhost']
+                        - message: localhostProfile is required only for Localhost
+                          rule: 'self.type == ''Localhost'' ? (has(self.localhostProfile)
+                            && size(self.localhostProfile) > 0) : !has(self.localhostProfile)'
+                        - message: localhostProfile must be a relative path without
+                            traversal
+                          rule: '!has(self.localhostProfile) || (self.localhostProfile.matches(''^[^/]+(/[^/]+)*$'')
+                            && !self.localhostProfile.matches(''(^|/)[.]{1,2}(/|$)''))'
+                    type: object
                   serviceAccountName:
                     description: |-
                       ServiceAccountName for the worker pods. The ServiceAccount must exist
@@ -479,6 +549,15 @@ spec:
             - sandboxClasses
             - workerImage
             type: object
+            x-kubernetes-validations:
+            - fieldPath: .template.securityContext.dropCapabilities
+              message: gvisor workers can drop only CHOWN, FOWNER, MKNOD, SETPCAP,
+                SYS_CHROOT and SYS_PTRACE
+              rule: '!has(self.template) || !has(self.template.securityContext) ||
+                !has(self.template.securityContext.dropCapabilities) || !has(self.sandboxClasses)
+                || !self.sandboxClasses.exists(c, c.name == ''gvisor'') || self.template.securityContext.dropCapabilities.all(c,
+                c in [''CHOWN'', ''FOWNER'', ''MKNOD'', ''SETPCAP'', ''SYS_CHROOT'',
+                ''SYS_PTRACE''])'
           status:
             description: status is the observed state of WorkerPool
             properties:

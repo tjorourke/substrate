@@ -24,6 +24,7 @@ import (
 	appsv1ac "k8s.io/client-go/applyconfigurations/apps/v1"
 	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	metav1ac "k8s.io/client-go/applyconfigurations/meta/v1"
+	"k8s.io/utils/ptr"
 
 	"github.com/agent-substrate/substrate/internal/ateom"
 	"github.com/agent-substrate/substrate/internal/deviceplugin"
@@ -234,6 +235,9 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool, otel ateomOTelSettin
 		)
 
 	applyWorkerPoolPodTemplate(podSpecAC, containerAC, wp.Spec.Template)
+	if wp.Spec.Template != nil && wp.Spec.Template.SecurityContext != nil {
+		applyWorkerSecurityContext(containerAC.SecurityContext, wp.Spec.Template.SecurityContext)
+	}
 	applySandboxClassToleration(podSpecAC, wp.Spec.DefaultSandboxClass())
 	maybeApplyMicroVMPodShape(podSpecAC, containerAC, wp.Spec.DefaultSandboxClass())
 	podSpecAC.WithContainers(containerAC)
@@ -339,27 +343,45 @@ func fieldRefEnv(name, fieldPath string) *corev1ac.EnvVarApplyConfiguration {
 				WithFieldPath(fieldPath)))
 }
 
-// ateomGvisorCapabilities is the capability set an unprivileged gVisor worker
-// needs. runsc's gofer maps a full-range identity in a user namespace
+// applyWorkerSecurityContext applies a WorkerPool's security settings on top of
+// the sandbox class's defaults. Validation only admits drops the class's worker
+// can run without, so the add list never ends up empty.
+func applyWorkerSecurityContext(sc *corev1ac.SecurityContextApplyConfiguration, settings *atev1alpha1.WorkerPoolSecurityContext) {
+	sc.Capabilities.Add = slices.DeleteFunc(sc.Capabilities.Add, func(capability corev1.Capability) bool {
+		return slices.Contains(settings.DropCapabilities, capability)
+	})
+	if settings.SeccompProfile != nil {
+		profile := corev1ac.SeccompProfile().WithType(settings.SeccompProfile.Type)
+		if settings.SeccompProfile.LocalhostProfile != nil {
+			profile.WithLocalhostProfile(*settings.SeccompProfile.LocalhostProfile)
+		}
+		sc.WithSeccompProfile(profile)
+	}
+	if ptr.Deref(settings.NoNewPrivileges, false) {
+		sc.WithAllowPrivilegeEscalation(false)
+	}
+}
+
+// ateomGvisorCapabilities is the default capability set for gVisor workers.
+// runsc's gofer maps a full-range identity in a user namespace
 // (SETUID/SETGID/SETPCAP/SETFCAP), the sandbox pivots root and traces the
 // application (SYS_ADMIN/SYS_CHROOT/SYS_PTRACE), actor networking programs the
-// veth and nftables rules (NET_ADMIN/NET_RAW), and the OCI rootfs is unpacked
-// and device nodes created as root over image-owned trees
-// (DAC_OVERRIDE/FOWNER/CHOWN/MKNOD). This replaces the former privileged worker;
-// seccomp stays at the runtime default, but AppArmor must be Unconfined (see
-// ateomSecurityContext) since runsc's own mounts trip the default profile.
+// veth and nftables rules (NET_ADMIN/NET_RAW), and rootfs trees are managed as
+// root (DAC_OVERRIDE/FOWNER/CHOWN). MKNOD remains in the default set; Linux's
+// 0:0 overlay whiteouts do not require it on the tested kernels.
+// Workers use Unconfined seccomp and AppArmor profiles by default so the sandbox
+// runtime can set up its mounts (see ateomSecurityContext).
 var ateomGvisorCapabilities = []corev1.Capability{
 	"NET_ADMIN", "SYS_ADMIN", "SYS_CHROOT", "SYS_PTRACE",
 	"SETUID", "SETGID", "SETPCAP", "DAC_OVERRIDE",
 	"FOWNER", "CHOWN", "MKNOD", "NET_RAW", "SETFCAP",
 }
 
-// ateomMicroVMCapabilities is the capability set an unprivileged micro-VM worker
-// needs: the gVisor set, which covers the same worker-side work, plus FSETID and
-// DAC_READ_SEARCH for virtiofsd. virtiofsd re-applies a fixed set to its
-// sandboxed child, and the kernel refuses to raise a capability the bounding set
-// omits, so without those two it exits with "can't apply the child capabilities"
-// and the VM never gets its virtio-fs device.
+// ateomMicroVMCapabilities is the default capability set for micro-VM workers:
+// the gVisor set, which covers the same worker-side work, plus FSETID and
+// DAC_READ_SEARCH for virtiofsd, whose sandboxed child gets those two and six
+// others by default. When the worker drops some of them, StartVirtiofsd removes
+// them from the child's set too, so virtiofsd can still start.
 //
 // The hypervisor devices are not capabilities: they come from atelet's device
 // plugin (see maybeApplyMicroVMPodShape).

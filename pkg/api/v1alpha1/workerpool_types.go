@@ -83,8 +83,49 @@ type WorkerPoolPodTemplate struct {
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	ServiceAccountName *string `json:"serviceAccountName,omitempty"`
+
+	// SecurityContext restricts the worker container's runtime permissions.
+	// These settings do not change the actor containers' security contexts.
+	// +optional
+	SecurityContext *WorkerPoolSecurityContext `json:"securityContext,omitempty"`
 }
 
+// WorkerPoolSecurityContext configures restrictions on the worker container.
+type WorkerPoolSecurityContext struct {
+	// DropCapabilities removes capabilities from the sandbox class's default
+	// set. Only capabilities the class's worker can run without are accepted:
+	// gvisor workers can drop CHOWN, FOWNER, MKNOD, SETPCAP, SYS_CHROOT and
+	// SYS_PTRACE, and microvm workers can also drop DAC_READ_SEARCH, FSETID,
+	// NET_RAW, SETFCAP and SETUID.
+	// +optional
+	// +kubebuilder:validation:MaxItems=11
+	// +listType=set
+	// +kubebuilder:validation:items:Enum=CHOWN;DAC_READ_SEARCH;FOWNER;FSETID;MKNOD;NET_RAW;SETFCAP;SETPCAP;SETUID;SYS_CHROOT;SYS_PTRACE
+	DropCapabilities []corev1.Capability `json:"dropCapabilities,omitempty"`
+
+	// SeccompProfile replaces the sandbox class's default seccomp profile.
+	// A Localhost profile must be installed on every node this pool selects.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self.type in ['Unconfined', 'RuntimeDefault', 'Localhost']",message="invalid seccomp profile type"
+	// +kubebuilder:validation:XValidation:rule="self.type == 'Localhost' ? (has(self.localhostProfile) && size(self.localhostProfile) > 0) : !has(self.localhostProfile)",message="localhostProfile is required only for Localhost"
+	// +kubebuilder:validation:XValidation:rule="!has(self.localhostProfile) || (self.localhostProfile.matches('^[^/]+(/[^/]+)*$') && !self.localhostProfile.matches('(^|/)[.]{1,2}(/|$)'))",message="localhostProfile must be a relative path without traversal"
+	SeccompProfile *corev1.SeccompProfile `json:"seccompProfile,omitempty"`
+
+	// NoNewPrivileges sets no_new_privs on the worker, so its processes
+	// cannot gain privileges by executing setuid or file-capability binaries.
+	// +optional
+	NoNewPrivileges *bool `json:"noNewPrivileges,omitempty"`
+}
+
+// DroppableWorkerCapabilities lists the capabilities each sandbox class's
+// worker can run without. The validation rules on WorkerPoolSecurityContext
+// and WorkerPoolSpec accept the same sets.
+var DroppableWorkerCapabilities = map[SandboxClass][]corev1.Capability{
+	SandboxClassGvisor:  {"CHOWN", "FOWNER", "MKNOD", "SETPCAP", "SYS_CHROOT", "SYS_PTRACE"},
+	SandboxClassMicroVM: {"CHOWN", "DAC_READ_SEARCH", "FOWNER", "FSETID", "MKNOD", "NET_RAW", "SETFCAP", "SETPCAP", "SETUID", "SYS_CHROOT", "SYS_PTRACE"},
+}
+
+// +kubebuilder:validation:XValidation:rule="!has(self.template) || !has(self.template.securityContext) || !has(self.template.securityContext.dropCapabilities) || !has(self.sandboxClasses) || !self.sandboxClasses.exists(c, c.name == 'gvisor') || self.template.securityContext.dropCapabilities.all(c, c in ['CHOWN', 'FOWNER', 'MKNOD', 'SETPCAP', 'SYS_CHROOT', 'SYS_PTRACE'])",message="gvisor workers can drop only CHOWN, FOWNER, MKNOD, SETPCAP, SYS_CHROOT and SYS_PTRACE",fieldPath=".template.securityContext.dropCapabilities"
 type WorkerPoolSpec struct {
 	// Replicas is the number of worker pods to run.
 	// +required

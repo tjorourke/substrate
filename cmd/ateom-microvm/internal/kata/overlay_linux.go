@@ -35,6 +35,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -121,9 +122,52 @@ type VirtiofsdOptions struct {
 	SysProcAttr *syscall.SysProcAttr
 }
 
-// virtiofsdArgs builds the virtiofsd command line for o.
-func virtiofsdArgs(o VirtiofsdOptions) []string {
-	return []string{
+// virtiofsdChildCapabilities is the capability set virtiofsd v1.14.0 gives its
+// sandboxed child by default. The child cannot keep a capability the worker's
+// bounding set lacks, so virtiofsd exits with "can't apply the child
+// capabilities" unless --modcaps removes each missing one first.
+var virtiofsdChildCapabilities = []struct {
+	name       string
+	capability uintptr
+}{
+	{"chown", unix.CAP_CHOWN},
+	{"dac_override", unix.CAP_DAC_OVERRIDE},
+	{"fowner", unix.CAP_FOWNER},
+	{"fsetid", unix.CAP_FSETID},
+	{"setgid", unix.CAP_SETGID},
+	{"setuid", unix.CAP_SETUID},
+	{"mknod", unix.CAP_MKNOD},
+	{"setfcap", unix.CAP_SETFCAP},
+}
+
+// readVirtiofsdBoundingSet reports which capabilities virtiofsd could give its
+// child, read once from the calling thread's bounding set, which virtiofsd
+// inherits.
+func readVirtiofsdBoundingSet() (map[uintptr]bool, error) {
+	set := make(map[uintptr]bool, len(virtiofsdChildCapabilities)+1)
+	read := func(capability uintptr) error {
+		in, err := unix.PrctlRetInt(unix.PR_CAPBSET_READ, capability, 0, 0, 0)
+		if err != nil {
+			return fmt.Errorf("reading bounding capability %d: %w", capability, err)
+		}
+		set[capability] = in == 1
+		return nil
+	}
+	for _, c := range virtiofsdChildCapabilities {
+		if err := read(c.capability); err != nil {
+			return nil, err
+		}
+	}
+	if err := read(unix.CAP_DAC_READ_SEARCH); err != nil {
+		return nil, err
+	}
+	return set, nil
+}
+
+// virtiofsdArgs builds the virtiofsd command line for o. boundingSet reports
+// which of virtiofsd's child capabilities the worker kept.
+func virtiofsdArgs(o VirtiofsdOptions, boundingSet map[uintptr]bool) []string {
+	args := []string{
 		"--socket-path=" + o.SocketPath,
 		"--shared-dir=" + o.SharedDir,
 		"--cache=auto",
@@ -135,6 +179,22 @@ func virtiofsdArgs(o VirtiofsdOptions) []string {
 		// trust bundle. guest-error returns EIO on those inodes instead.
 		"--migration-on-error", "guest-error",
 	}
+	var removed []string
+	for _, c := range virtiofsdChildCapabilities {
+		if !boundingSet[c.capability] {
+			removed = append(removed, "-"+c.name)
+		}
+	}
+	if len(removed) > 0 {
+		args = append(args, "--modcaps="+strings.Join(removed, ":"))
+	}
+	if !boundingSet[unix.CAP_DAC_READ_SEARCH] {
+		// virtiofsd adds DAC_READ_SEARCH to the child while it opens inodes by
+		// file handle, and refuses --modcaps=-dac_read_search in that mode.
+		// Without file handles it keeps an O_PATH descriptor per inode instead.
+		args = append(args, "--inode-file-handles=never")
+	}
+	return args
 }
 
 // StartVirtiofsd launches virtiofsd in find-paths migration mode serving o.SharedDir
@@ -146,7 +206,11 @@ func StartVirtiofsd(ctx context.Context, o VirtiofsdOptions) (*exec.Cmd, error) 
 		bin = "virtiofsd"
 	}
 	_ = os.Remove(o.SocketPath)
-	cmd := exec.Command(bin, virtiofsdArgs(o)...)
+	boundingSet, err := readVirtiofsdBoundingSet()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(bin, virtiofsdArgs(o, boundingSet)...)
 	cmd.Stdout = o.Log
 	cmd.Stderr = o.Log
 	cmd.SysProcAttr = o.SysProcAttr

@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -494,6 +495,115 @@ func TestAteomSecurityContextByClass(t *testing.T) {
 				t.Errorf("seccomp Unconfined = %v, want %v", gotSeccompUnconfined, tt.wantSeccompUnconfined)
 			}
 		})
+	}
+}
+
+func TestWorkerSecurityContext(t *testing.T) {
+	gvisorDefaults := slices.Clone(ateomGvisorCapabilities)
+	microVMDefaults := slices.Clone(ateomMicroVMCapabilities)
+	tests := []struct {
+		name     string
+		class    atev1alpha1.SandboxClass
+		settings *atev1alpha1.WorkerPoolSecurityContext
+		wantCaps []corev1.Capability
+	}{
+		{"omitted settings", atev1alpha1.SandboxClassGvisor, nil, gvisorDefaults},
+		{"empty settings", atev1alpha1.SandboxClassGvisor, &atev1alpha1.WorkerPoolSecurityContext{}, gvisorDefaults},
+		{"empty microvm settings", atev1alpha1.SandboxClassMicroVM, &atev1alpha1.WorkerPoolSecurityContext{}, microVMDefaults},
+		{"drop gvisor capabilities", atev1alpha1.SandboxClassGvisor, &atev1alpha1.WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"SYS_PTRACE", "MKNOD"}}, []corev1.Capability{"NET_ADMIN", "SYS_ADMIN", "SYS_CHROOT", "SETUID", "SETGID", "SETPCAP", "DAC_OVERRIDE", "FOWNER", "CHOWN", "NET_RAW", "SETFCAP"}},
+		{"drop microvm capabilities", atev1alpha1.SandboxClassMicroVM, &atev1alpha1.WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"FSETID", "DAC_READ_SEARCH"}}, gvisorDefaults},
+		{"capability absent from class", atev1alpha1.SandboxClassGvisor, &atev1alpha1.WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"FSETID"}}, gvisorDefaults},
+		{"drop every droppable gvisor capability", atev1alpha1.SandboxClassGvisor, &atev1alpha1.WorkerPoolSecurityContext{DropCapabilities: atev1alpha1.DroppableWorkerCapabilities[atev1alpha1.SandboxClassGvisor]}, []corev1.Capability{"NET_ADMIN", "SYS_ADMIN", "SETUID", "SETGID", "DAC_OVERRIDE", "NET_RAW", "SETFCAP"}},
+		{"drop every droppable microvm capability", atev1alpha1.SandboxClassMicroVM, &atev1alpha1.WorkerPoolSecurityContext{DropCapabilities: atev1alpha1.DroppableWorkerCapabilities[atev1alpha1.SandboxClassMicroVM]}, []corev1.Capability{"NET_ADMIN", "SYS_ADMIN", "SETGID", "DAC_OVERRIDE"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wp := testWorkerPoolApplyConfig(&atev1alpha1.WorkerPoolPodTemplate{SecurityContext: tt.settings})
+			wp.Spec.SandboxClasses = []atev1alpha1.WorkerPoolSandboxClass{{Name: tt.class}}
+			sc := buildDeploymentApplyConfig(wp, ateomOTelSettings{}, installdefaults.SystemNamespace, installdefaults.AteletServiceAccount, installdefaults.RouterServiceAccount).Spec.Template.Spec.Containers[0].SecurityContext
+			if sc == nil || sc.Capabilities == nil {
+				t.Fatal("worker security context and capabilities must be set")
+			}
+			if diff := cmp.Diff(tt.wantCaps, sc.Capabilities.Add); diff != "" {
+				t.Fatalf("capabilities (-want +got):\n%s", diff)
+			}
+			if !ptr.Equal(sc.Privileged, ptr.To(false)) || !ptr.Equal(sc.RunAsUser, ptr.To(int64(0))) || !ptr.Equal(sc.RunAsGroup, ptr.To(int64(0))) || !slices.Equal(sc.Capabilities.Drop, []corev1.Capability{"ALL"}) {
+				t.Fatal("worker identity, privileged mode or capability default changed")
+			}
+			if diff := cmp.Diff(corev1ac.SeccompProfile().WithType(corev1.SeccompProfileTypeUnconfined), sc.SeccompProfile); diff != "" {
+				t.Errorf("default seccomp profile (-want +got):\n%s", diff)
+			}
+			if sc.AllowPrivilegeEscalation != nil {
+				t.Errorf("AllowPrivilegeEscalation = %v, want nil", *sc.AllowPrivilegeEscalation)
+			}
+			// Compare against copies taken before any overrides, not the globals
+			// that a slice-aliasing regression could have mutated.
+			for _, defaults := range []struct {
+				class atev1alpha1.SandboxClass
+				want  []corev1.Capability
+				got   []corev1.Capability
+			}{
+				{atev1alpha1.SandboxClassGvisor, gvisorDefaults, ateomGvisorCapabilities},
+				{atev1alpha1.SandboxClassMicroVM, microVMDefaults, ateomMicroVMCapabilities},
+			} {
+				if diff := cmp.Diff(defaults.want, defaults.got); diff != "" {
+					t.Errorf("%s global defaults mutated (-want +got):\n%s", defaults.class, diff)
+				}
+				otherPool := testWorkerPoolApplyConfig(nil)
+				otherPool.Spec.SandboxClasses = []atev1alpha1.WorkerPoolSandboxClass{{Name: defaults.class}}
+				otherSC := buildDeploymentApplyConfig(otherPool, ateomOTelSettings{}, installdefaults.SystemNamespace, installdefaults.AteletServiceAccount, installdefaults.RouterServiceAccount).Spec.Template.Spec.Containers[0].SecurityContext
+				if diff := cmp.Diff(defaults.want, otherSC.Capabilities.Add); diff != "" {
+					t.Errorf("%s subsequent pool capabilities (-want +got):\n%s", defaults.class, diff)
+				}
+			}
+		})
+	}
+	for _, profile := range []*corev1.SeccompProfile{
+		{Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To("substrate-worker.json")},
+		{Type: corev1.SeccompProfileTypeRuntimeDefault},
+		{Type: corev1.SeccompProfileTypeUnconfined},
+	} {
+		t.Run(string(profile.Type), func(t *testing.T) {
+			wp := testWorkerPoolApplyConfig(&atev1alpha1.WorkerPoolPodTemplate{SecurityContext: &atev1alpha1.WorkerPoolSecurityContext{SeccompProfile: profile, NoNewPrivileges: ptr.To(true)}})
+			sc := buildDeploymentApplyConfig(wp, ateomOTelSettings{}, installdefaults.SystemNamespace, installdefaults.AteletServiceAccount, installdefaults.RouterServiceAccount).Spec.Template.Spec.Containers[0].SecurityContext
+			want := corev1ac.SeccompProfile().WithType(profile.Type)
+			if profile.LocalhostProfile != nil {
+				want.WithLocalhostProfile(*profile.LocalhostProfile)
+			}
+			if diff := cmp.Diff(want, sc.SeccompProfile); diff != "" {
+				t.Errorf("seccomp profile (-want +got):\n%s", diff)
+			}
+			if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
+				t.Fatal("privilege escalation was not disabled")
+			}
+		})
+	}
+}
+
+// TestDroppableWorkerCapabilities checks the capability sets validation admits
+// against the class defaults: each droppable capability is one the class grants,
+// so a drop is never silently ignored, and dropping all of them still leaves
+// capabilities to add, so the generated add list is never empty.
+func TestDroppableWorkerCapabilities(t *testing.T) {
+	for class, defaults := range map[atev1alpha1.SandboxClass][]corev1.Capability{
+		atev1alpha1.SandboxClassGvisor:  ateomGvisorCapabilities,
+		atev1alpha1.SandboxClassMicroVM: ateomMicroVMCapabilities,
+	} {
+		droppable, ok := atev1alpha1.DroppableWorkerCapabilities[class]
+		if !ok {
+			t.Fatalf("%s: no droppable capabilities listed", class)
+		}
+		for _, capability := range droppable {
+			if !slices.Contains(defaults, capability) {
+				t.Errorf("%s: droppable capability %s is not in the class defaults", class, capability)
+			}
+		}
+		remaining := slices.DeleteFunc(slices.Clone(defaults), func(capability corev1.Capability) bool {
+			return slices.Contains(droppable, capability)
+		})
+		if len(remaining) == 0 {
+			t.Errorf("%s: dropping every droppable capability leaves none to add", class)
+		}
 	}
 }
 
