@@ -59,7 +59,7 @@ import (
 	"github.com/agent-substrate/substrate/pkg/client/informers/externalversions"
 	"github.com/agent-substrate/substrate/pkg/objectstorage"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
-	objectstoresnapshotv1 "github.com/agent-substrate/substrate/pkg/proto/objectstoresnapshotpb/v1"
+	objectstorev1 "github.com/agent-substrate/substrate/pkg/proto/objectstorepb/v1"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/spf13/pflag"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -302,7 +302,7 @@ func main() {
 		ateomDialer,
 		wrappedAnonGCS,
 		wrappedGCS,
-		objectstoresnapshotv1.NewNodeProviderClient(snapshotPluginConn),
+		objectstorev1.NewNodeProviderClient(snapshotPluginConn),
 		imageCache,
 		instruments,
 		volPlugins,
@@ -458,7 +458,7 @@ type AteomHerder struct {
 	// through snapshotPlugin.
 	gcsClient objectstorage.ObjectStorage
 	// snapshotPlugin moves external snapshot files between the node and storage.
-	snapshotPlugin objectstoresnapshotv1.NodeProviderClient
+	snapshotPlugin objectstorev1.NodeProviderClient
 	// snapshotScratchDir holds short-lived manifest directories; it must be
 	// inside the node plugin's root.
 	snapshotScratchDir    string
@@ -477,7 +477,7 @@ func NewService(
 	ateomDialer *AteomDialer,
 	anonGCSClient objectstorage.ObjectStorage,
 	gcsClient objectstorage.ObjectStorage,
-	snapshotPlugin objectstoresnapshotv1.NodeProviderClient,
+	snapshotPlugin objectstorev1.NodeProviderClient,
 	imageCache *imagecache.Store,
 	instruments *Instruments,
 	volumePlugins map[string]volume.VolumePluginWorkerPlane,
@@ -542,13 +542,13 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (resp *
 		return nil, err
 	}
 	containerSpecs, err := s.prepareOCIBundles(ctx, actorUID, actorRef,
-		req.GetSpec(), sandboxRec.PauseImage, req.GetTargetAteomUid(),
+		req.GetSpec(), sandboxRec.PauseImage,
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	client, err := s.dialAteom(ctx, req.GetTargetAteomUid())
+	client, err := s.dialAteom(ctx, req.GetWorkerPodUid())
 	if err != nil {
 		return nil, err
 	}
@@ -678,7 +678,7 @@ func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRe
 
 	checkpointDir := ateletpath.CheckpointStateDir(actorUID)
 
-	client, err := s.dialAteom(ctx, req.GetTargetAteomUid())
+	client, err := s.dialAteom(ctx, req.GetWorkerPodUid())
 	if err != nil {
 		return nil, err
 	}
@@ -1003,18 +1003,12 @@ func (s *AteomHerder) uploadLocalCheckpointDir(ctx context.Context, req *ateletp
 	if capturedFidelity == "" {
 		return rec.SandboxClass, apierror.FailedPrecondition("local snapshot %q has no fidelity recorded in its manifest; resume and pause the actor again before suspending it", req.GetLocalSnapshotName())
 	}
-	desiredFidelity := ateattr.SnapshotFidelityValue(req.GetDesiredFidelity())
-
-	switch {
-	case capturedFidelity == desiredFidelity:
-	case capturedFidelity == ateattr.SnapshotFidelityVolumes && desiredFidelity == ateattr.SnapshotFidelityMemory:
-		// The control plane rejects this before marking SUSPENDING; reaching
-		// it here means the template changed mid-flight or store state drifted.
-		return rec.SandboxClass, apierror.FailedPrecondition("pause snapshot captured %s; cannot upload it as %s (memory was never captured)", capturedFidelity, desiredFidelity)
-	default: // captured MEMORY, VOLUMES wanted
-		if err := narrowMemoryCaptureToVolumes(rec); err != nil {
-			return rec.SandboxClass, err
-		}
+	// Pause and suspend capture the template's one preferred fidelity, and a
+	// paused actor's template cannot change, so the upload is always of what
+	// the pause captured. A mismatch means the store or the control plane
+	// drifted; refuse rather than guess.
+	if desiredFidelity := ateattr.SnapshotFidelityValue(req.GetDesiredFidelity()); capturedFidelity != desiredFidelity {
+		return rec.SandboxClass, apierror.FailedPrecondition("pause snapshot captured %s; upload asks for %s", capturedFidelity, desiredFidelity)
 	}
 
 	// The local snapshot stays until the upload succeeds, so a retry can
@@ -1029,19 +1023,6 @@ func readSnapshotManifest(dir string) ([]byte, error) {
 	}
 	defer root.Close()
 	return root.ReadFile(sandboxManifestName)
-}
-
-// narrowMemoryCaptureToVolumes rewrites rec so a MEMORY capture uploads as a
-// VOLUMES snapshot holding only the volume files ateom reported at checkpoint.
-func narrowMemoryCaptureToVolumes(rec *sandboxAssetsRecord) error {
-	if len(rec.DataSnapshotFiles) == 0 {
-		// Either no durable-dir volumes were attached at pause, or the
-		// manifest predates the list. Neither is retryable.
-		return apierror.FailedPrecondition("memory capture lists no volume files; the actor has no durable data to upload as %s", ateattr.SnapshotFidelityVolumes)
-	}
-	rec.SnapshotFiles = rec.DataSnapshotFiles
-	rec.Fidelity = ateattr.SnapshotFidelityVolumes
-	return nil
 }
 
 func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest) (resp *ateletpb.RestoreResponse, err error) {
@@ -1211,7 +1192,7 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 			return err
 		}
 		t := time.Now()
-		containerSpecs, err = s.prepareOCIBundles(gctx, actorUID, actorRef, req.GetSpec(), runtimeRec.PauseImage, req.GetTargetAteomUid())
+		containerSpecs, err = s.prepareOCIBundles(gctx, actorUID, actorRef, req.GetSpec(), runtimeRec.PauseImage)
 		dBundles = time.Since(t)
 		if err != nil {
 			prepFailedPhase = ateattr.SnapshotPhaseOCIUnpack
@@ -1229,7 +1210,7 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 		return nil, err
 	}
 
-	client, err := s.dialAteom(ctx, req.GetTargetAteomUid())
+	client, err := s.dialAteom(ctx, req.GetWorkerPodUid())
 	if err != nil {
 		return nil, err
 	}
@@ -1290,7 +1271,7 @@ func (s *AteomHerder) Terminate(ctx context.Context, req *ateletpb.TerminateRequ
 	actorRef := resources.ActorRef{Atespace: req.GetAtespace(), Name: req.GetActorName()}
 	actorUID := req.GetActorUid()
 
-	if req.GetTargetAteomUid() != "" {
+	if req.GetWorkerPodUid() != "" {
 		var assetPaths map[string]string
 		sandboxRec, err := readSandboxRecord(actorUID)
 		if err != nil {
@@ -1302,7 +1283,7 @@ func (s *AteomHerder) Terminate(ctx context.Context, req *ateletpb.TerminateRequ
 		}
 		assetPaths = paths
 
-		client, err := s.dialAteom(ctx, req.GetTargetAteomUid())
+		client, err := s.dialAteom(ctx, req.GetWorkerPodUid())
 		if err != nil {
 			return nil, fmt.Errorf("failed to dial ateom for terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
 		}
@@ -1474,7 +1455,6 @@ func (s *AteomHerder) prepareOCIBundles(
 	actorRef resources.ActorRef,
 	spec *ateletpb.WorkloadSpec,
 	pauseImage string,
-	targetAteomUid string,
 ) ([]*ateompb.ContainerSpec, error) {
 	// Prepare host folders for volume types that need them.
 	for _, vol := range spec.GetVolumes() {
@@ -1532,10 +1512,10 @@ func (s *AteomHerder) prepareOCIBundles(
 
 // dialAteom opens (or reuses) the gRPC connection to the target ateom
 // pod and returns an ateom client.
-func (s *AteomHerder) dialAteom(ctx context.Context, targetAteomUid string) (ateompb.AteomClient, error) {
-	conn, err := s.ateomDialer.DialAteomPod(ctx, targetAteomUid)
+func (s *AteomHerder) dialAteom(ctx context.Context, workerPodUID string) (ateompb.AteomClient, error) {
+	conn, err := s.ateomDialer.DialAteomPod(ctx, workerPodUID)
 	if err != nil {
-		return nil, fmt.Errorf("while getting ateom conn for %s: %w", targetAteomUid, err)
+		return nil, fmt.Errorf("while getting ateom conn for %s: %w", workerPodUID, err)
 	}
 	return ateompb.NewAteomClient(conn), nil
 }
@@ -1708,7 +1688,7 @@ func validateRunRequest(req *ateletpb.RunRequest) error {
 		return errs.ToAggregate()
 	}
 	// TODO: Migrate all validations below to the validation framework.
-	if err := resources.ValidateAteomUID(req.GetTargetAteomUid()); err != nil {
+	if err := resources.ValidateWorkerPodUID(req.GetWorkerPodUid()); err != nil {
 		return err
 	}
 	names := make([]string, 0, len(req.GetSpec().GetContainers()))
@@ -1727,7 +1707,7 @@ func validateCheckpointRequest(req *ateletpb.CheckpointRequest) error {
 		return errs.ToAggregate()
 	}
 	// TODO: Migrate all validations below to the validation framework.
-	if err := resources.ValidateAteomUID(req.GetTargetAteomUid()); err != nil {
+	if err := resources.ValidateWorkerPodUID(req.GetWorkerPodUid()); err != nil {
 		return err
 	}
 	names := make([]string, 0, len(req.GetSpec().GetContainers()))
@@ -1766,7 +1746,7 @@ func validateRestoreRequest(req *ateletpb.RestoreRequest) error {
 		return errs.ToAggregate()
 	}
 	// TODO: Migrate all validations below to the validation framework.
-	if err := resources.ValidateAteomUID(req.GetTargetAteomUid()); err != nil {
+	if err := resources.ValidateWorkerPodUID(req.GetWorkerPodUid()); err != nil {
 		return err
 	}
 	names := make([]string, 0, len(req.GetSpec().GetContainers()))
@@ -1808,8 +1788,8 @@ func validateTerminateRequest(req *ateletpb.TerminateRequest) error {
 	if len(errs) > 0 {
 		return errs.ToAggregate()
 	}
-	if req.GetTargetAteomUid() != "" {
-		if err := resources.ValidateAteomUID(req.GetTargetAteomUid()); err != nil {
+	if req.GetWorkerPodUid() != "" {
+		if err := resources.ValidateWorkerPodUID(req.GetWorkerPodUid()); err != nil {
 			return err
 		}
 	}
@@ -1820,18 +1800,17 @@ func validateTerminateRequest(req *ateletpb.TerminateRequest) error {
 	return resources.ValidateContainerNames(names)
 }
 
-// validateFidelity rejects a fidelity no runtime can serve. ROOTFS is in the
-// enum but not captured by any sandbox runtime yet, so it is refused here as
-// well as at template admission.
+// validateFidelity accepts every level of the ladder. Which levels a sandbox
+// runtime can actually serve is the runtime's call: atelet forwards the
+// fidelity and ateom rejects what it cannot capture.
 func validateFidelity(fidelity ateletpb.SnapshotFidelity) error {
 	switch fidelity {
-	case ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
-		ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES:
+	case ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+		ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS,
+		ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY:
 		return nil
 	case ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED:
 		return fmt.Errorf("snapshot fidelity must be non-zero")
-	case ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS:
-		return fmt.Errorf("ROOTFS fidelity is not supported yet")
 	default:
 		return fmt.Errorf("invalid snapshot fidelity: %v", fidelity)
 	}
@@ -1851,14 +1830,8 @@ func validateUploadPausedCheckpointRequest(req *ateletpb.UploadPausedCheckpointR
 	if _, err := resources.ParseSnapshotURI(req.GetDestinationSnapshotUri()); err != nil {
 		errs = append(errs, field.Invalid(field.NewPath("destination_snapshot_uri"), req.GetDestinationSnapshotUri(), err.Error()))
 	}
-	// Uploads only ever produce MEMORY or VOLUMES snapshots.
-	switch req.GetDesiredFidelity() {
-	case ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES:
-	case ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS:
-		errs = append(errs, field.Invalid(field.NewPath("desired_fidelity"), req.GetDesiredFidelity().String(), "ROOTFS fidelity is not supported yet"))
-	default:
-		errs = append(errs, field.NotSupported(field.NewPath("desired_fidelity"), req.GetDesiredFidelity(),
-			[]string{ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY.String(), ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES.String()}))
+	if err := validateFidelity(req.GetDesiredFidelity()); err != nil {
+		errs = append(errs, field.Invalid(field.NewPath("desired_fidelity"), req.GetDesiredFidelity().String(), err.Error()))
 	}
 	return errs.ToAggregate()
 }

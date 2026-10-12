@@ -131,9 +131,9 @@ func (w *ActorWorkflow) ensureAteletTerminated(ctx context.Context, actorRef res
 		return nil
 	}
 
-	targetAteomUID := ""
+	workerPodUID := ""
 	if assignment := actor.GetStatus().GetWorkerAssignment(); assignment != nil {
-		targetAteomUID = assignment.GetWorkerPodUid()
+		workerPodUID = assignment.GetWorkerPodUid()
 		if workerName := assignment.GetWorker().GetName(); workerName != "" {
 			// Ask whether the worker still HOSTS this actor, not whether its one
 			// assignment happens to be this actor: a worker hosting several is the
@@ -146,7 +146,7 @@ func (w *ActorWorkflow) ensureAteletTerminated(ctx context.Context, actorRef res
 				slog.InfoContext(ctx, "worker is no longer assigned to this actor, skipping ateom workload termination",
 					slog.String("worker", workerName),
 					slog.Any("actor", actorRef))
-				targetAteomUID = ""
+				workerPodUID = ""
 			}
 		}
 	}
@@ -192,7 +192,7 @@ func (w *ActorWorkflow) ensureAteletTerminated(ctx context.Context, actorRef res
 	}
 
 	req := &ateletpb.TerminateRequest{
-		TargetAteomUid:        targetAteomUID,
+		WorkerPodUid:          workerPodUID,
 		Atespace:              actor.GetMetadata().GetAtespace(),
 		ActorName:             actor.GetMetadata().GetName(),
 		ActorUid:              actor.GetMetadata().GetUid(),
@@ -289,7 +289,7 @@ func (w *ActorWorkflow) ensureWorkerReleased(ctx context.Context, actorRef resou
 
 		updatedActor, err := w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(latestActor), func(dbActor *ateapipb.Actor) error {
 			if dbActor.Status != nil {
-				removeSnapshotStorageEntries(dbActor.Status, ateapipb.SnapshotDurability_SNAPSHOT_DURABILITY_LOCAL, nil)
+				clearLocalSnapshots(dbActor.Status)
 				dbActor.Status.AssignedNode = ""
 				dbActor.Status.WorkerAssignment = nil
 			}
@@ -397,8 +397,8 @@ func (w *ActorWorkflow) ensureExternalSnapshotsReleased(ctx context.Context, act
 // wrote anything.
 func actorSnapshotStoragePrefix(actor *ateapipb.Actor) (resources.StoragePrefix, error) {
 	actorOwner := actorSnapshotOwner(actor)
-	if _, st := findLatestSnapshotStorage(actor.GetStatus(), ateapipb.SnapshotDurability_SNAPSHOT_DURABILITY_DURABLE, ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED); st != nil {
-		snapshotURI := st.GetObject().GetSnapshotUri()
+	if snap := findLatestDurableSnapshot(actor.GetStatus(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED); snap != nil {
+		snapshotURI := snap.GetDurableSnapshot().GetObject().GetSnapshotUri()
 		uri, err := resources.ParseSnapshotURI(snapshotURI)
 		if err != nil {
 			return resources.StoragePrefix{}, fmt.Errorf("while parsing the external snapshot %q: %w", snapshotURI, err)
@@ -413,8 +413,8 @@ func actorSnapshotStoragePrefix(actor *ateapipb.Actor) (resources.StoragePrefix,
 	// Nothing of the actor's own is recorded. Unless a suspend died partway,
 	// nothing was ever written under its prefix: the in-progress URI is
 	// recorded before atelet uploads the first object.
-	_, inProgressSt := findLatestSnapshotStorage(actor.GetStatus(), ateapipb.SnapshotDurability_SNAPSHOT_DURABILITY_DURABLE, ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_IN_PROGRESS)
-	inProgress := inProgressSt.GetObject().GetSnapshotUri()
+	inProgressSnap := findLatestDurableSnapshot(actor.GetStatus(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING)
+	inProgress := inProgressSnap.GetDurableSnapshot().GetObject().GetSnapshotUri()
 	if inProgress == "" {
 		return resources.StoragePrefix{}, nil
 	}

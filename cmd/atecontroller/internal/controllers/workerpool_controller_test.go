@@ -82,10 +82,27 @@ func TestMain(m *testing.M) {
 	}
 
 	if err := (&WorkerPoolReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorder("workerpool-controller"),
+		APIReader: mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		fmt.Fprintf(os.Stderr, "controller setup failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := (&SandboxConfigProtectionReconciler{
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+	}).SetupWithManager(mgr); err != nil {
+		fmt.Fprintf(os.Stderr, "sandboxconfig protection controller setup failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	// makeWorkerPool omits configRef, so every gvisor pool resolves to this
+	// class default. Tests that need to control the class default use microvm.
+	if err := k8sClient.Create(context.Background(), makeSandboxConfig(testGvisorDefault, atev1alpha1.SandboxClassGvisor, true)); err != nil {
+		fmt.Fprintf(os.Stderr, "create default SandboxConfig: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -556,6 +573,11 @@ func TestWorkerPoolCapabilitiesRepairDrift(t *testing.T) {
 			})
 			wp := makeWorkerPool("test-caps-drift-"+string(class), "default", 1, "ateom:v1")
 			wp.Spec.SandboxClasses = []atev1alpha1.WorkerPoolSandboxClass{{Name: class}}
+			if class == atev1alpha1.SandboxClassMicroVM {
+				config := makeSandboxConfig(wp.Name, class, false)
+				createSandboxConfig(t, config)
+				wp.Spec.SandboxClasses[0].ConfigRef = &atev1alpha1.SandboxConfigReference{Name: config.Name}
+			}
 			wp.Spec.Template = &atev1alpha1.WorkerPoolPodTemplate{SecurityContext: &atev1alpha1.WorkerPoolSecurityContext{DropCapabilities: drop}}
 			if err := k8sClient.Create(ctx, wp); err != nil {
 				t.Fatal(err)

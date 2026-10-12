@@ -394,8 +394,8 @@ func validateTemplateVolumesUnchanged(oldTemplate, newTemplate *ateapipb.ActorTe
 // Deleting an actor collects everything under its external snapshot prefix. If
 // the location prefix ever changes, we risk leaking the snapshots under the old prefix.
 func validateSnapshotLocationUnchanged(actor *ateapipb.Actor, newTemplate *ateapipb.ActorTemplate) error {
-	_, st := findLatestSnapshotStorage(actor.GetStatus(), ateapipb.SnapshotDurability_SNAPSHOT_DURABILITY_DURABLE, ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
-	currentSnapshotURI := st.GetObject().GetSnapshotUri()
+	snap := findLatestDurableSnapshot(actor.GetStatus(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
+	currentSnapshotURI := snap.GetDurableSnapshot().GetObject().GetSnapshotUri()
 	if currentSnapshotURI == "" {
 		return nil
 	}
@@ -562,7 +562,7 @@ func (s *RPCService) MintActorJWT(ctx context.Context, req *ateapipb.MintActorJW
 	}
 
 	// We only issue tokens with audience bindings.
-	if len(req.GetAudience()) == 0 {
+	if len(req.GetAudiences()) == 0 {
 		return nil, fmt.Errorf("at least one audience must be requested")
 	}
 
@@ -573,7 +573,7 @@ func (s *RPCService) MintActorJWT(ctx context.Context, req *ateapipb.MintActorJW
 	actorClaims := &actoridjwt.Claims{
 		Issuer:     s.actorJWTIssuer,
 		Subject:    fmt.Sprintf("actor/%s/%s", dbActor.GetMetadata().GetAtespace(), dbActor.GetMetadata().GetName()),
-		Audiences:  req.GetAudience(),
+		Audiences:  req.GetAudiences(),
 		Expiration: expiresAt,
 		NotBefore:  now.Add(-5 * time.Minute),
 		IssuedAt:   now,
