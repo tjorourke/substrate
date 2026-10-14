@@ -32,7 +32,7 @@ import (
 
 // TestWorkerSecurityContextLifecycle runs the counter actor through golden
 // creation, pause/resume and suspend/resume on workers that drop every
-// capability their sandbox class can drop, and on workers that drop only MKNOD.
+// capability their sandbox class can drop, and on workers that drop only SYS_CHROOT.
 // E2E_WORKER_SECURITY_MATRIX=1 adds one case per droppable capability.
 func TestWorkerSecurityContextLifecycle(t *testing.T) {
 	ctx := t.Context()
@@ -49,11 +49,11 @@ func TestWorkerSecurityContextLifecycle(t *testing.T) {
 	}
 	cases := []testCase{
 		{name: "drop every droppable capability", dropCapabilities: droppable},
-		{name: "drop MKNOD", dropCapabilities: []corev1.Capability{"MKNOD"}},
+		{name: "drop SYS_CHROOT", dropCapabilities: []corev1.Capability{"SYS_CHROOT"}},
 	}
 	if os.Getenv("E2E_WORKER_SECURITY_MATRIX") != "" {
 		for _, capability := range droppable {
-			if capability != "MKNOD" {
+			if capability != "SYS_CHROOT" {
 				cases = append(cases, testCase{name: "drop " + string(capability), dropCapabilities: []corev1.Capability{capability}})
 			}
 		}

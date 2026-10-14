@@ -440,26 +440,19 @@ spec:
                       dropCapabilities:
                         description: |-
                           DropCapabilities removes capabilities from the sandbox class's default
-                          set. Only capabilities the class's worker can run without are accepted:
-                          gvisor workers can drop CHOWN, FOWNER, MKNOD, SETPCAP, SYS_CHROOT and
-                          SYS_PTRACE, and microvm workers can also drop DAC_READ_SEARCH, FSETID,
-                          NET_RAW, SETFCAP and SETUID.
+                          set. gvisor workers can drop MKNOD, SETPCAP, SYS_CHROOT and SYS_PTRACE;
+                          microvm workers can drop NET_RAW, SETPCAP, SYS_CHROOT and SYS_PTRACE.
+                          Filesystem ownership and virtiofsd's child capabilities are retained.
                         items:
                           description: Capability represent POSIX capabilities type
                           enum:
-                          - CHOWN
-                          - DAC_READ_SEARCH
-                          - FOWNER
-                          - FSETID
                           - MKNOD
                           - NET_RAW
-                          - SETFCAP
                           - SETPCAP
-                          - SETUID
                           - SYS_CHROOT
                           - SYS_PTRACE
                           type: string
-                        maxItems: 11
+                        maxItems: 4
                         type: array
                         x-kubernetes-list-type: set
                       noNewPrivileges:
@@ -564,13 +557,19 @@ spec:
             type: object
             x-kubernetes-validations:
             - fieldPath: .template.securityContext.dropCapabilities
-              message: gvisor workers can drop only CHOWN, FOWNER, MKNOD, SETPCAP,
-                SYS_CHROOT and SYS_PTRACE
+              message: gvisor workers can drop only MKNOD, SETPCAP, SYS_CHROOT and
+                SYS_PTRACE
               rule: '!has(self.template) || !has(self.template.securityContext) ||
                 !has(self.template.securityContext.dropCapabilities) || !has(self.sandboxClasses)
                 || !self.sandboxClasses.exists(c, c.name == ''gvisor'') || self.template.securityContext.dropCapabilities.all(c,
-                c in [''CHOWN'', ''FOWNER'', ''MKNOD'', ''SETPCAP'', ''SYS_CHROOT'',
-                ''SYS_PTRACE''])'
+                c in [''MKNOD'', ''SETPCAP'', ''SYS_CHROOT'', ''SYS_PTRACE''])'
+            - fieldPath: .template.securityContext.dropCapabilities
+              message: microvm workers can drop only NET_RAW, SETPCAP, SYS_CHROOT
+                and SYS_PTRACE
+              rule: '!has(self.template) || !has(self.template.securityContext) ||
+                !has(self.template.securityContext.dropCapabilities) || !has(self.sandboxClasses)
+                || !self.sandboxClasses.exists(c, c.name == ''microvm'') || self.template.securityContext.dropCapabilities.all(c,
+                c in [''NET_RAW'', ''SETPCAP'', ''SYS_CHROOT'', ''SYS_PTRACE''])'
           status:
             description: status is the observed state of WorkerPool
             properties:

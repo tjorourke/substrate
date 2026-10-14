@@ -84,9 +84,14 @@ func TestVirtiofsdArgs(t *testing.T) {
 	args := virtiofsdArgs(VirtiofsdOptions{
 		SocketPath: "/run/vm/virtiofsd.sock",
 		SharedDir:  "/run/kata-containers/shared/sandboxes/uid/shared",
-	}, fullVirtiofsdBoundingSet())
+	})
 	if !slices.Contains(args, "--cache=auto") {
 		t.Errorf("args %v do not contain --cache=auto", args)
+	}
+	for _, required := range []string{"--sandbox=namespace", "--seccomp=kill"} {
+		if !slices.Contains(args, required) {
+			t.Errorf("args %v do not contain %s", args, required)
+		}
 	}
 	// The host kernel owns the overlay; the guest needs no xattr passthrough, so
 	// the flag must never be emitted.
@@ -100,99 +105,7 @@ func TestVirtiofsdArgs(t *testing.T) {
 	}
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "--modcaps") || strings.HasPrefix(arg, "--inode-file-handles") {
-			t.Errorf("args %v change virtiofsd's capabilities although the worker kept all of them", args)
-		}
-	}
-}
-
-func fullVirtiofsdBoundingSet() map[uintptr]bool {
-	set := map[uintptr]bool{unix.CAP_DAC_READ_SEARCH: true}
-	for _, c := range virtiofsdChildCapabilities {
-		set[c.capability] = true
-	}
-	return set
-}
-
-func TestVirtiofsdArgsWithoutCapabilities(t *testing.T) {
-	opts := VirtiofsdOptions{
-		SocketPath: "/run/vm/virtiofsd.sock",
-		SharedDir:  "/run/kata-containers/shared/sandboxes/uid/shared",
-	}
-	base := virtiofsdArgs(opts, fullVirtiofsdBoundingSet())
-	for _, tt := range []struct {
-		name    string
-		missing []uintptr
-		want    []string
-	}{
-		{
-			name:    "MKNOD",
-			missing: []uintptr{unix.CAP_MKNOD},
-			want:    []string{"--modcaps=-mknod"},
-		},
-		{
-			name:    "FSETID",
-			missing: []uintptr{unix.CAP_FSETID},
-			want:    []string{"--modcaps=-fsetid"},
-		},
-		{
-			name:    "several child capabilities",
-			missing: []uintptr{unix.CAP_SETFCAP, unix.CAP_CHOWN, unix.CAP_SETUID},
-			want:    []string{"--modcaps=-chown:-setuid:-setfcap"},
-		},
-		{
-			name:    "DAC_READ_SEARCH",
-			missing: []uintptr{unix.CAP_DAC_READ_SEARCH},
-			want:    []string{"--inode-file-handles=never"},
-		},
-		{
-			name: "every child capability",
-			missing: []uintptr{
-				unix.CAP_CHOWN, unix.CAP_DAC_OVERRIDE, unix.CAP_FOWNER, unix.CAP_FSETID,
-				unix.CAP_SETGID, unix.CAP_SETUID, unix.CAP_MKNOD, unix.CAP_SETFCAP,
-				unix.CAP_DAC_READ_SEARCH,
-			},
-			want: []string{
-				"--modcaps=-chown:-dac_override:-fowner:-fsetid:-setgid:-setuid:-mknod:-setfcap",
-				"--inode-file-handles=never",
-			},
-		},
-		{
-			// Capabilities outside virtiofsd's child set change nothing.
-			name:    "SYS_PTRACE",
-			missing: []uintptr{unix.CAP_SYS_PTRACE},
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			set := fullVirtiofsdBoundingSet()
-			for _, capability := range tt.missing {
-				set[capability] = false
-			}
-			got := virtiofsdArgs(opts, set)
-			want := append(slices.Clone(base), tt.want...)
-			if !slices.Equal(got, want) {
-				t.Errorf("args = %v, want %v", got, want)
-			}
-		})
-	}
-}
-
-// readVirtiofsdBoundingSet must cover every capability virtiofsdArgs consults;
-// a missing entry would read as dropped.
-func TestReadVirtiofsdBoundingSet(t *testing.T) {
-	set, err := readVirtiofsdBoundingSet()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for capability := range fullVirtiofsdBoundingSet() {
-		if _, ok := set[capability]; !ok {
-			t.Errorf("bounding set does not report capability %d", capability)
-		}
-		in, err := unix.PrctlRetInt(unix.PR_CAPBSET_READ, capability, 0, 0, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if set[capability] != (in == 1) {
-			t.Errorf("capability %d: got %v, kernel reports %d", capability, set[capability], in)
+			t.Errorf("args %v change virtiofsd's capabilities or file-handle mode", args)
 		}
 	}
 }

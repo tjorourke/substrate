@@ -521,7 +521,7 @@ func TestWorkerPoolSecurityContextUpdateAndClear(t *testing.T) {
 		current.Spec.Template.SecurityContext.DropCapabilities = atev1alpha1.DroppableWorkerCapabilities[atev1alpha1.SandboxClassGvisor]
 		current.Spec.Template.SecurityContext.SeccompProfile = &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To("worker.json")}
 	})
-	want.Capabilities.Add = []corev1.Capability{"NET_ADMIN", "SYS_ADMIN", "SETUID", "SETGID", "DAC_OVERRIDE", "NET_RAW", "SETFCAP"}
+	want.Capabilities.Add = []corev1.Capability{"NET_ADMIN", "SYS_ADMIN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER", "CHOWN", "NET_RAW", "SETFCAP"}
 	want.SeccompProfile = &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To("worker.json")}
 	waitForWorkerSecurityContext(t, wp, want)
 	updateWorkerPoolSpec(t, ctx, wp, "clear escalation override", func(current *atev1alpha1.WorkerPool) {

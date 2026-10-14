@@ -379,9 +379,8 @@ var ateomGvisorCapabilities = []corev1.Capability{
 
 // ateomMicroVMCapabilities is the default capability set for micro-VM workers:
 // the gVisor set, which covers the same worker-side work, plus FSETID and
-// DAC_READ_SEARCH for virtiofsd, whose sandboxed child gets those two and six
-// others by default. When the worker drops some of them, StartVirtiofsd removes
-// them from the child's set too, so virtiofsd can still start.
+// DAC_READ_SEARCH for virtiofsd's normal child capability set. Those permissions
+// are retained to preserve guest filesystem behavior.
 //
 // The hypervisor devices are not capabilities: they come from atelet's device
 // plugin (see maybeApplyMicroVMPodShape).

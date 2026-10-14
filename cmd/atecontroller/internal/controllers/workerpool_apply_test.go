@@ -511,10 +511,10 @@ func TestWorkerSecurityContext(t *testing.T) {
 		{"empty settings", atev1alpha1.SandboxClassGvisor, &atev1alpha1.WorkerPoolSecurityContext{}, gvisorDefaults},
 		{"empty microvm settings", atev1alpha1.SandboxClassMicroVM, &atev1alpha1.WorkerPoolSecurityContext{}, microVMDefaults},
 		{"drop gvisor capabilities", atev1alpha1.SandboxClassGvisor, &atev1alpha1.WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"SYS_PTRACE", "MKNOD"}}, []corev1.Capability{"NET_ADMIN", "SYS_ADMIN", "SYS_CHROOT", "SETUID", "SETGID", "SETPCAP", "DAC_OVERRIDE", "FOWNER", "CHOWN", "NET_RAW", "SETFCAP"}},
-		{"drop microvm capabilities", atev1alpha1.SandboxClassMicroVM, &atev1alpha1.WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"FSETID", "DAC_READ_SEARCH"}}, gvisorDefaults},
+		{"drop microvm capabilities", atev1alpha1.SandboxClassMicroVM, &atev1alpha1.WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"NET_RAW", "SYS_PTRACE"}}, []corev1.Capability{"NET_ADMIN", "SYS_ADMIN", "SYS_CHROOT", "SETUID", "SETGID", "SETPCAP", "DAC_OVERRIDE", "FOWNER", "CHOWN", "MKNOD", "SETFCAP", "FSETID", "DAC_READ_SEARCH"}},
 		{"capability absent from class", atev1alpha1.SandboxClassGvisor, &atev1alpha1.WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"FSETID"}}, gvisorDefaults},
-		{"drop every droppable gvisor capability", atev1alpha1.SandboxClassGvisor, &atev1alpha1.WorkerPoolSecurityContext{DropCapabilities: atev1alpha1.DroppableWorkerCapabilities[atev1alpha1.SandboxClassGvisor]}, []corev1.Capability{"NET_ADMIN", "SYS_ADMIN", "SETUID", "SETGID", "DAC_OVERRIDE", "NET_RAW", "SETFCAP"}},
-		{"drop every droppable microvm capability", atev1alpha1.SandboxClassMicroVM, &atev1alpha1.WorkerPoolSecurityContext{DropCapabilities: atev1alpha1.DroppableWorkerCapabilities[atev1alpha1.SandboxClassMicroVM]}, []corev1.Capability{"NET_ADMIN", "SYS_ADMIN", "SETGID", "DAC_OVERRIDE"}},
+		{"drop every droppable gvisor capability", atev1alpha1.SandboxClassGvisor, &atev1alpha1.WorkerPoolSecurityContext{DropCapabilities: atev1alpha1.DroppableWorkerCapabilities[atev1alpha1.SandboxClassGvisor]}, []corev1.Capability{"NET_ADMIN", "SYS_ADMIN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER", "CHOWN", "NET_RAW", "SETFCAP"}},
+		{"drop every droppable microvm capability", atev1alpha1.SandboxClassMicroVM, &atev1alpha1.WorkerPoolSecurityContext{DropCapabilities: atev1alpha1.DroppableWorkerCapabilities[atev1alpha1.SandboxClassMicroVM]}, []corev1.Capability{"NET_ADMIN", "SYS_ADMIN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER", "CHOWN", "MKNOD", "SETFCAP", "FSETID", "DAC_READ_SEARCH"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

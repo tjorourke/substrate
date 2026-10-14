@@ -93,14 +93,13 @@ type WorkerPoolPodTemplate struct {
 // WorkerPoolSecurityContext configures restrictions on the worker container.
 type WorkerPoolSecurityContext struct {
 	// DropCapabilities removes capabilities from the sandbox class's default
-	// set. Only capabilities the class's worker can run without are accepted:
-	// gvisor workers can drop CHOWN, FOWNER, MKNOD, SETPCAP, SYS_CHROOT and
-	// SYS_PTRACE, and microvm workers can also drop DAC_READ_SEARCH, FSETID,
-	// NET_RAW, SETFCAP and SETUID.
+	// set. gvisor workers can drop MKNOD, SETPCAP, SYS_CHROOT and SYS_PTRACE;
+	// microvm workers can drop NET_RAW, SETPCAP, SYS_CHROOT and SYS_PTRACE.
+	// Filesystem ownership and virtiofsd's child capabilities are retained.
 	// +optional
-	// +kubebuilder:validation:MaxItems=11
+	// +kubebuilder:validation:MaxItems=4
 	// +listType=set
-	// +kubebuilder:validation:items:Enum=CHOWN;DAC_READ_SEARCH;FOWNER;FSETID;MKNOD;NET_RAW;SETFCAP;SETPCAP;SETUID;SYS_CHROOT;SYS_PTRACE
+	// +kubebuilder:validation:items:Enum=MKNOD;NET_RAW;SETPCAP;SYS_CHROOT;SYS_PTRACE
 	DropCapabilities []corev1.Capability `json:"dropCapabilities,omitempty"`
 
 	// SeccompProfile replaces the sandbox class's default seccomp profile.
@@ -121,11 +120,12 @@ type WorkerPoolSecurityContext struct {
 // worker can run without. The validation rules on WorkerPoolSecurityContext
 // and WorkerPoolSpec accept the same sets.
 var DroppableWorkerCapabilities = map[SandboxClass][]corev1.Capability{
-	SandboxClassGvisor:  {"CHOWN", "FOWNER", "MKNOD", "SETPCAP", "SYS_CHROOT", "SYS_PTRACE"},
-	SandboxClassMicroVM: {"CHOWN", "DAC_READ_SEARCH", "FOWNER", "FSETID", "MKNOD", "NET_RAW", "SETFCAP", "SETPCAP", "SETUID", "SYS_CHROOT", "SYS_PTRACE"},
+	SandboxClassGvisor:  {"MKNOD", "SETPCAP", "SYS_CHROOT", "SYS_PTRACE"},
+	SandboxClassMicroVM: {"NET_RAW", "SETPCAP", "SYS_CHROOT", "SYS_PTRACE"},
 }
 
-// +kubebuilder:validation:XValidation:rule="!has(self.template) || !has(self.template.securityContext) || !has(self.template.securityContext.dropCapabilities) || !has(self.sandboxClasses) || !self.sandboxClasses.exists(c, c.name == 'gvisor') || self.template.securityContext.dropCapabilities.all(c, c in ['CHOWN', 'FOWNER', 'MKNOD', 'SETPCAP', 'SYS_CHROOT', 'SYS_PTRACE'])",message="gvisor workers can drop only CHOWN, FOWNER, MKNOD, SETPCAP, SYS_CHROOT and SYS_PTRACE",fieldPath=".template.securityContext.dropCapabilities"
+// +kubebuilder:validation:XValidation:rule="!has(self.template) || !has(self.template.securityContext) || !has(self.template.securityContext.dropCapabilities) || !has(self.sandboxClasses) || !self.sandboxClasses.exists(c, c.name == 'gvisor') || self.template.securityContext.dropCapabilities.all(c, c in ['MKNOD', 'SETPCAP', 'SYS_CHROOT', 'SYS_PTRACE'])",message="gvisor workers can drop only MKNOD, SETPCAP, SYS_CHROOT and SYS_PTRACE",fieldPath=".template.securityContext.dropCapabilities"
+// +kubebuilder:validation:XValidation:rule="!has(self.template) || !has(self.template.securityContext) || !has(self.template.securityContext.dropCapabilities) || !has(self.sandboxClasses) || !self.sandboxClasses.exists(c, c.name == 'microvm') || self.template.securityContext.dropCapabilities.all(c, c in ['NET_RAW', 'SETPCAP', 'SYS_CHROOT', 'SYS_PTRACE'])",message="microvm workers can drop only NET_RAW, SETPCAP, SYS_CHROOT and SYS_PTRACE",fieldPath=".template.securityContext.dropCapabilities"
 type WorkerPoolSpec struct {
 	// Replicas is the number of worker pods to run.
 	// +required

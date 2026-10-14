@@ -45,6 +45,8 @@ func TestWorkerPoolSecurityValidation(t *testing.T) {
 		{"empty", WorkerPoolSecurityContext{}, ""},
 		{"drop capabilities", WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"SYS_PTRACE", "MKNOD"}}, ""},
 		{"drop all", WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"ALL"}}, "dropCapabilities[0]: Unsupported value"},
+		{"retain file ownership", WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"CHOWN"}}, "dropCapabilities[0]: Unsupported value"},
+		{"retain foreign file modes", WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"FOWNER"}}, "dropCapabilities[0]: Unsupported value"},
 		{"unknown capability", WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"NOT_A_CAPABILITY"}}, "dropCapabilities[0]: Unsupported value"},
 		{"duplicate capability", WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{"MKNOD", "MKNOD"}}, "dropCapabilities[1]: Duplicate value"},
 		{"no new privileges", WorkerPoolSecurityContext{NoNewPrivileges: ptr.To(true)}, ""},
@@ -99,6 +101,26 @@ func TestWorkerPoolSecurityValidation(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+// Guest filesystem permissions must not be removed merely because a root-only
+// counter can start. These drops broke ownership restore or guest operations.
+func TestWorkerPoolRetainsFilesystemCapabilities(t *testing.T) {
+	for _, class := range []SandboxClass{SandboxClassGvisor, SandboxClassMicroVM} {
+		retained := []corev1.Capability{"CHOWN", "FOWNER", "SETUID", "SETFCAP"}
+		if class == SandboxClassMicroVM {
+			retained = append(retained, "MKNOD", "FSETID", "DAC_READ_SEARCH")
+		}
+		for i, capability := range retained {
+			t.Run(string(class)+"/"+string(capability), func(t *testing.T) {
+				wp := &WorkerPool{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("retain-fs-%s-%d", class, i), Namespace: "default"}, Spec: WorkerPoolSpec{Replicas: 1, WorkerImage: "ateom:v1", SandboxClasses: []WorkerPoolSandboxClass{{Name: class}}, Template: &WorkerPoolPodTemplate{SecurityContext: &WorkerPoolSecurityContext{DropCapabilities: []corev1.Capability{capability}}}}}
+				err := k8sClient.Create(t.Context(), wp)
+				if !k8errors.IsInvalid(err) {
+					t.Fatalf("dropping %s on %s: got %v, want rejection", capability, class, err)
+				}
+			})
+		}
 	}
 }
 
